@@ -17,3 +17,12 @@ mvn spring-boot:run
 ```
 
 Backend runs on `http://localhost:8000`, matching `frontend/.env`.
+
+## Backend Docker
+
+```bash
+cd backend
+docker compose up -d --build
+```
+
+This starts both `backend` and `mysql`.
