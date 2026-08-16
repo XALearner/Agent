@@ -1,6 +1,8 @@
 package com.agent.controller;
 
 import com.agent.dto.ChatRequest;
+import com.agent.llm.ChatCompletionRequest;
+import com.agent.service.ChatModelService;
 import com.agent.service.SessionService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.validation.Valid;
@@ -20,6 +22,7 @@ import java.util.Map;
 public class ChatController {
 
     private final ObjectMapper objectMapper;
+    private final ChatModelService chatModelService;
     private final SessionService sessionService;
 
     @PostMapping(value = "/chat_on_docs", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -28,15 +31,20 @@ public class ChatController {
             @Valid @RequestBody ChatRequest request
     ) {
         return outputStream -> {
-            String answer = "后端框架已接通。这里是占位回复，后续可以替换为真实知识库问答或大模型调用。";
-            for (String chunk : answer.split("(?<=。|，)")) {
+            ChatCompletionRequest modelRequest = ChatCompletionRequest.builder()
+                    .message(request.getMessage())
+                    .model(request.getModel())
+                    .systemPrompt(request.getSystemPrompt())
+                    .build();
+
+            String answer = chatModelService.streamChat(request.getProvider(), modelRequest, (content, thinking) -> {
                 String payload = objectMapper.writeValueAsString(Map.of(
-                        "content", chunk,
-                        "thinking", false
+                        "content", content,
+                        "thinking", thinking
                 ));
                 outputStream.write(("data: " + payload + "\n\n").getBytes(StandardCharsets.UTF_8));
                 outputStream.flush();
-            }
+            });
             outputStream.write("data: [DONE]\n\n".getBytes(StandardCharsets.UTF_8));
             outputStream.flush();
             sessionService.saveChatResult(sessionId, request.getMessage(), answer);

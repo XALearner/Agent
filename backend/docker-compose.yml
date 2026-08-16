@@ -37,6 +37,10 @@ services:
       SPRING_DATASOURCE_USERNAME: root
       SPRING_DATASOURCE_PASSWORD: root
       APP_UPLOAD_DIR: /app/uploads
+      LLM_DEFAULT_PROVIDER: ${LLM_DEFAULT_PROVIDER:-qwen}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      QWEN_BASE_URL: ${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      QWEN_MODEL: ${QWEN_MODEL:-qwen-plus}
       TZ: Asia/Shanghai
     volumes:
       - backend_uploads:/app/uploads

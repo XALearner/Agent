@@ -2,3 +2,4 @@ target/
 uploads/*
 !uploads/.gitkeep
 *.log
+.env
