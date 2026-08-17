@@ -59,6 +59,10 @@ public class SessionService {
     }
 
     public void saveChatResult(String sessionId, String question, String answer) {
+        saveChatResult(sessionId, question, answer, "[]");
+    }
+
+    public void saveChatResult(String sessionId, String question, String answer, String documents) {
         LocalDateTime now = LocalDateTime.now();
 
         ChatMessage message = new ChatMessage();
@@ -67,7 +71,7 @@ public class SessionService {
         message.setUserQuestion(question);
         message.setModelAnswer(answer);
         message.setRecommendedQuestions("[]");
-        message.setDocuments("[]");
+        message.setDocuments(documents);
         message.setCreatedAt(now);
         message.setUpdatedAt(now);
         chatMessageMapper.insert(message);
