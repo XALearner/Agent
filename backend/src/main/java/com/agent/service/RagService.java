@@ -2,10 +2,15 @@ package com.agent.service;
 
 import com.agent.dto.RagReference;
 import com.agent.entity.SessionDocument;
+import com.agent.entity.SessionDocumentChunk;
+import com.agent.mapper.SessionDocumentChunkMapper;
 import com.agent.exception.BizException;
 import com.agent.mapper.SessionDocumentMapper;
 import com.agent.util.IdUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
@@ -16,6 +21,7 @@ import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -28,12 +34,10 @@ import java.text.BreakIterator;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.Map;
 
 @Service
 @RequiredArgsConstructor
@@ -43,13 +47,17 @@ public class RagService {
     private static final int CHUNK_OVERLAP = 120;
     private static final int MAX_REFERENCES = 5;
     private static final int MAX_CONTEXT_LENGTH = 6000;
-    private static final Pattern TOKEN_PATTERN = Pattern.compile("[\\p{IsHan}]{2,}|[A-Za-z0-9_]{2,}");
+    private static final int EMBEDDING_BATCH_SIZE = 16;
 
     private final SessionDocumentMapper sessionDocumentMapper;
+    private final SessionDocumentChunkMapper sessionDocumentChunkMapper;
+    private final DashScopeEmbeddingClient embeddingClient;
+    private final ObjectMapper objectMapper;
 
     @Value("${app.upload-dir}")
     private String uploadDir;
 
+    @Transactional
     public void saveSessionDocument(String sessionId, MultipartFile file) {
         if (!StringUtils.hasText(sessionId)) {
             throw new BizException("session_id 不能为空");
@@ -62,10 +70,11 @@ public class RagService {
                 .getFileName()
                 .toString();
         Path target = sessionDocumentPath(sessionId, originalName);
+        String text;
         try {
             Files.createDirectories(target.getParent());
             file.transferTo(target);
-            extractText(target, originalName);
+            text = extractText(target, originalName);
         } catch (IOException exception) {
             throw new BizException("文档解析失败：" + exception.getMessage());
         }
@@ -80,6 +89,7 @@ public class RagService {
         document.setCreatedAt(now);
         document.setUpdatedAt(now);
         sessionDocumentMapper.insert(document);
+        saveChunks(sessionId, document.getId(), split(text), now);
     }
 
     public List<RagReference> retrieve(String sessionId, String question) {
@@ -87,35 +97,39 @@ public class RagService {
             return List.of();
         }
 
-        List<SessionDocument> documents = sessionDocumentMapper.selectList(new LambdaQueryWrapper<SessionDocument>()
-                .eq(SessionDocument::getSessionId, sessionId)
-                .orderByDesc(SessionDocument::getUpdatedAt));
-        if (documents.isEmpty()) {
+        List<Double> queryEmbedding = embeddingClient.embed(question);
+        if (queryEmbedding.isEmpty()) {
             return List.of();
         }
 
-        Set<String> queryTokens = tokens(question);
-        List<ScoredChunk> chunks = new ArrayList<>();
-        for (SessionDocument document : documents) {
-            Path path = sessionDocumentPath(sessionId, document.getDocumentName());
-            if (!Files.exists(path)) {
+        List<SessionDocumentChunk> storedChunks = sessionDocumentChunkMapper.selectList(new LambdaQueryWrapper<SessionDocumentChunk>()
+                .eq(SessionDocumentChunk::getSessionId, sessionId));
+        if (storedChunks.isEmpty()) {
+            return List.of();
+        }
+
+        List<Long> documentIds = storedChunks.stream()
+                .map(SessionDocumentChunk::getDocumentId)
+                .distinct()
+                .toList();
+        Map<Long, SessionDocument> documents = new HashMap<>();
+        sessionDocumentMapper.selectBatchIds(documentIds)
+                .forEach(document -> documents.put(document.getId(), document));
+
+        List<ScoredChunk> scoredChunks = new ArrayList<>();
+        for (SessionDocumentChunk chunk : storedChunks) {
+            SessionDocument document = documents.get(chunk.getDocumentId());
+            if (document == null) {
                 continue;
             }
-            try {
-                String text = extractText(path, document.getDocumentName());
-                split(text).forEach(chunk -> {
-                    int score = score(queryTokens, chunk.content());
-                    if (score > 0) {
-                        chunks.add(new ScoredChunk(document, chunk, score));
-                    }
-                });
-            } catch (IOException ignored) {
-                // Ignore unreadable documents so one bad file does not break chat.
+            double score = cosineSimilarity(queryEmbedding, parseEmbedding(chunk.getEmbedding()));
+            if (score > 0) {
+                scoredChunks.add(new ScoredChunk(document, chunk, score));
             }
         }
 
-        return chunks.stream()
-                .sorted(Comparator.comparingInt(ScoredChunk::score).reversed())
+        return scoredChunks.stream()
+                .sorted(Comparator.comparingDouble(ScoredChunk::score).reversed())
                 .limit(MAX_REFERENCES)
                 .map(this::toReference)
                 .toList();
@@ -149,15 +163,40 @@ public class RagService {
 
     private RagReference toReference(ScoredChunk scoredChunk) {
         SessionDocument document = scoredChunk.document();
-        TextChunk chunk = scoredChunk.chunk();
-        String id = document.getId() + "-" + chunk.index();
+        SessionDocumentChunk chunk = scoredChunk.chunk();
+        String id = document.getId() + "-" + chunk.getChunkIndex();
         return RagReference.builder()
                 .id(id)
                 .documentId(String.valueOf(document.getId()))
                 .documentName(document.getDocumentName())
-                .contentWithWeight(chunk.content())
-                .positions(List.of(List.of(chunk.start(), chunk.end())))
+                .contentWithWeight(chunk.getContent())
+                .positions(List.of(List.of(chunk.getStartOffset(), chunk.getEndOffset())))
                 .build();
+    }
+
+    private void saveChunks(String sessionId, Long documentId, List<TextChunk> chunks, LocalDateTime now) {
+        for (int start = 0; start < chunks.size(); start += EMBEDDING_BATCH_SIZE) {
+            int end = Math.min(start + EMBEDDING_BATCH_SIZE, chunks.size());
+            List<TextChunk> batch = chunks.subList(start, end);
+            List<List<Double>> embeddings = embeddingClient.embed(batch.stream()
+                    .map(TextChunk::content)
+                    .toList());
+
+            for (int index = 0; index < batch.size(); index++) {
+                TextChunk textChunk = batch.get(index);
+                SessionDocumentChunk chunk = new SessionDocumentChunk();
+                chunk.setDocumentId(documentId);
+                chunk.setSessionId(sessionId);
+                chunk.setChunkIndex(textChunk.index());
+                chunk.setStartOffset(textChunk.start());
+                chunk.setEndOffset(textChunk.end());
+                chunk.setContent(textChunk.content());
+                chunk.setEmbedding(toJson(embeddings.get(index)));
+                chunk.setCreatedAt(now);
+                chunk.setUpdatedAt(now);
+                sessionDocumentChunkMapper.insert(chunk);
+            }
+        }
     }
 
     private Path sessionDocumentPath(String sessionId, String fileName) {
@@ -229,27 +268,42 @@ public class RagService {
         return end;
     }
 
-    private int score(Set<String> queryTokens, String content) {
-        if (queryTokens.isEmpty()) {
-            return 1;
+    private String toJson(List<Double> embedding) {
+        try {
+            return objectMapper.writeValueAsString(embedding);
+        } catch (JsonProcessingException exception) {
+            throw new BizException("向量序列化失败：" + exception.getMessage());
         }
-        String lower = content.toLowerCase(Locale.ROOT);
-        int score = 0;
-        for (String token : queryTokens) {
-            if (lower.contains(token)) {
-                score += token.length();
-            }
-        }
-        return score;
     }
 
-    private Set<String> tokens(String text) {
-        Set<String> result = new HashSet<>();
-        Matcher matcher = TOKEN_PATTERN.matcher(text.toLowerCase(Locale.ROOT));
-        while (matcher.find()) {
-            result.add(matcher.group());
+    private List<Double> parseEmbedding(String embedding) {
+        try {
+            return objectMapper.readValue(embedding, new TypeReference<>() {
+            });
+        } catch (JsonProcessingException exception) {
+            return List.of();
         }
-        return result;
+    }
+
+    private double cosineSimilarity(List<Double> left, List<Double> right) {
+        if (left.isEmpty() || left.size() != right.size()) {
+            return 0;
+        }
+
+        double dot = 0;
+        double leftNorm = 0;
+        double rightNorm = 0;
+        for (int index = 0; index < left.size(); index++) {
+            double leftValue = left.get(index);
+            double rightValue = right.get(index);
+            dot += leftValue * rightValue;
+            leftNorm += leftValue * leftValue;
+            rightNorm += rightValue * rightValue;
+        }
+        if (leftNorm == 0 || rightNorm == 0) {
+            return 0;
+        }
+        return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
     }
 
     private String extension(String fileName) {
@@ -268,6 +322,6 @@ public class RagService {
     private record TextChunk(int index, int start, int end, String content) {
     }
 
-    private record ScoredChunk(SessionDocument document, TextChunk chunk, int score) {
+    private record ScoredChunk(SessionDocument document, SessionDocumentChunk chunk, double score) {
     }
 }
