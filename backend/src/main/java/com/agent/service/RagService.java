@@ -2,15 +2,11 @@ package com.agent.service;
 
 import com.agent.dto.RagReference;
 import com.agent.entity.SessionDocument;
-import com.agent.entity.SessionDocumentChunk;
-import com.agent.mapper.SessionDocumentChunkMapper;
 import com.agent.exception.BizException;
 import com.agent.mapper.SessionDocumentMapper;
+import com.agent.service.ElasticsearchVectorStore.VectorChunk;
+import com.agent.service.ElasticsearchVectorStore.VectorSearchResult;
 import com.agent.util.IdUtil;
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
@@ -33,11 +29,8 @@ import java.nio.file.Path;
 import java.text.BreakIterator;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 
 @Service
 @RequiredArgsConstructor
@@ -50,9 +43,8 @@ public class RagService {
     private static final int EMBEDDING_BATCH_SIZE = 16;
 
     private final SessionDocumentMapper sessionDocumentMapper;
-    private final SessionDocumentChunkMapper sessionDocumentChunkMapper;
     private final DashScopeEmbeddingClient embeddingClient;
-    private final ObjectMapper objectMapper;
+    private final ElasticsearchVectorStore vectorStore;
 
     @Value("${app.upload-dir}")
     private String uploadDir;
@@ -89,7 +81,7 @@ public class RagService {
         document.setCreatedAt(now);
         document.setUpdatedAt(now);
         sessionDocumentMapper.insert(document);
-        saveChunks(sessionId, document.getId(), split(text), now);
+        indexChunks(sessionId, document, split(text));
     }
 
     public List<RagReference> retrieve(String sessionId, String question) {
@@ -102,35 +94,8 @@ public class RagService {
             return List.of();
         }
 
-        List<SessionDocumentChunk> storedChunks = sessionDocumentChunkMapper.selectList(new LambdaQueryWrapper<SessionDocumentChunk>()
-                .eq(SessionDocumentChunk::getSessionId, sessionId));
-        if (storedChunks.isEmpty()) {
-            return List.of();
-        }
-
-        List<Long> documentIds = storedChunks.stream()
-                .map(SessionDocumentChunk::getDocumentId)
-                .distinct()
-                .toList();
-        Map<Long, SessionDocument> documents = new HashMap<>();
-        sessionDocumentMapper.selectBatchIds(documentIds)
-                .forEach(document -> documents.put(document.getId(), document));
-
-        List<ScoredChunk> scoredChunks = new ArrayList<>();
-        for (SessionDocumentChunk chunk : storedChunks) {
-            SessionDocument document = documents.get(chunk.getDocumentId());
-            if (document == null) {
-                continue;
-            }
-            double score = cosineSimilarity(queryEmbedding, parseEmbedding(chunk.getEmbedding()));
-            if (score > 0) {
-                scoredChunks.add(new ScoredChunk(document, chunk, score));
-            }
-        }
-
-        return scoredChunks.stream()
-                .sorted(Comparator.comparingDouble(ScoredChunk::score).reversed())
-                .limit(MAX_REFERENCES)
+        return vectorStore.search(sessionId, queryEmbedding, MAX_REFERENCES)
+                .stream()
                 .map(this::toReference)
                 .toList();
     }
@@ -161,20 +126,18 @@ public class RagService {
                 """.formatted(context.substring(0, Math.min(context.length(), MAX_CONTEXT_LENGTH)), question);
     }
 
-    private RagReference toReference(ScoredChunk scoredChunk) {
-        SessionDocument document = scoredChunk.document();
-        SessionDocumentChunk chunk = scoredChunk.chunk();
-        String id = document.getId() + "-" + chunk.getChunkIndex();
+    private RagReference toReference(VectorSearchResult result) {
+        String id = result.documentId() + "-" + result.chunkIndex();
         return RagReference.builder()
                 .id(id)
-                .documentId(String.valueOf(document.getId()))
-                .documentName(document.getDocumentName())
-                .contentWithWeight(chunk.getContent())
-                .positions(List.of(List.of(chunk.getStartOffset(), chunk.getEndOffset())))
+                .documentId(String.valueOf(result.documentId()))
+                .documentName(result.documentName())
+                .contentWithWeight(result.content())
+                .positions(List.of(List.of(result.startOffset(), result.endOffset())))
                 .build();
     }
 
-    private void saveChunks(String sessionId, Long documentId, List<TextChunk> chunks, LocalDateTime now) {
+    private void indexChunks(String sessionId, SessionDocument document, List<TextChunk> chunks) {
         for (int start = 0; start < chunks.size(); start += EMBEDDING_BATCH_SIZE) {
             int end = Math.min(start + EMBEDDING_BATCH_SIZE, chunks.size());
             List<TextChunk> batch = chunks.subList(start, end);
@@ -182,20 +145,21 @@ public class RagService {
                     .map(TextChunk::content)
                     .toList());
 
+            List<VectorChunk> vectorChunks = new ArrayList<>();
             for (int index = 0; index < batch.size(); index++) {
                 TextChunk textChunk = batch.get(index);
-                SessionDocumentChunk chunk = new SessionDocumentChunk();
-                chunk.setDocumentId(documentId);
-                chunk.setSessionId(sessionId);
-                chunk.setChunkIndex(textChunk.index());
-                chunk.setStartOffset(textChunk.start());
-                chunk.setEndOffset(textChunk.end());
-                chunk.setContent(textChunk.content());
-                chunk.setEmbedding(toJson(embeddings.get(index)));
-                chunk.setCreatedAt(now);
-                chunk.setUpdatedAt(now);
-                sessionDocumentChunkMapper.insert(chunk);
+                vectorChunks.add(new VectorChunk(
+                        sessionId,
+                        document.getId(),
+                        document.getDocumentName(),
+                        textChunk.index(),
+                        textChunk.start(),
+                        textChunk.end(),
+                        textChunk.content(),
+                        embeddings.get(index)
+                ));
             }
+            vectorStore.indexChunks(vectorChunks);
         }
     }
 
@@ -268,44 +232,6 @@ public class RagService {
         return end;
     }
 
-    private String toJson(List<Double> embedding) {
-        try {
-            return objectMapper.writeValueAsString(embedding);
-        } catch (JsonProcessingException exception) {
-            throw new BizException("向量序列化失败：" + exception.getMessage());
-        }
-    }
-
-    private List<Double> parseEmbedding(String embedding) {
-        try {
-            return objectMapper.readValue(embedding, new TypeReference<>() {
-            });
-        } catch (JsonProcessingException exception) {
-            return List.of();
-        }
-    }
-
-    private double cosineSimilarity(List<Double> left, List<Double> right) {
-        if (left.isEmpty() || left.size() != right.size()) {
-            return 0;
-        }
-
-        double dot = 0;
-        double leftNorm = 0;
-        double rightNorm = 0;
-        for (int index = 0; index < left.size(); index++) {
-            double leftValue = left.get(index);
-            double rightValue = right.get(index);
-            dot += leftValue * rightValue;
-            leftNorm += leftValue * leftValue;
-            rightNorm += rightValue * rightValue;
-        }
-        if (leftNorm == 0 || rightNorm == 0) {
-            return 0;
-        }
-        return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
-    }
-
     private String extension(String fileName) {
         int index = fileName.lastIndexOf('.');
         if (index < 0 || index == fileName.length() - 1) {
@@ -320,8 +246,5 @@ public class RagService {
     }
 
     private record TextChunk(int index, int start, int end, String content) {
-    }
-
-    private record ScoredChunk(SessionDocument document, SessionDocumentChunk chunk, double score) {
     }
 }

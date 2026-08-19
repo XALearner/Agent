@@ -52,18 +52,3 @@ CREATE TABLE IF NOT EXISTS session_documents (
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS session_document_chunks (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  document_id BIGINT NOT NULL,
-  session_id VARCHAR(64) NOT NULL,
-  chunk_index INT NOT NULL,
-  start_offset INT NOT NULL,
-  end_offset INT NOT NULL,
-  content MEDIUMTEXT NOT NULL,
-  embedding MEDIUMTEXT NOT NULL,
-  created_at DATETIME NOT NULL,
-  updated_at DATETIME NOT NULL,
-  INDEX idx_session_document_chunks_session_id (session_id),
-  INDEX idx_session_document_chunks_document_id (document_id)
-);

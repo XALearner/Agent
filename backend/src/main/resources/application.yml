@@ -33,3 +33,11 @@ qwen:
   model: ${QWEN_MODEL:qwen-plus}
   embedding-model: ${QWEN_EMBEDDING_MODEL:text-embedding-v3}
   system-prompt: ${QWEN_SYSTEM_PROMPT:你是一个专业、可靠的中文 AI 助手。}
+
+elasticsearch:
+  url: ${ELASTICSEARCH_URL:http://localhost:9200}
+  username: ${ELASTICSEARCH_USERNAME:}
+  password: ${ELASTICSEARCH_PASSWORD:}
+  api-key: ${ELASTICSEARCH_API_KEY:}
+  vector-index: ${ELASTICSEARCH_VECTOR_INDEX:agent-session-document-chunks}
+  num-candidates: ${ELASTICSEARCH_NUM_CANDIDATES:100}
