@@ -29,6 +29,7 @@ import java.nio.file.Path;
 import java.text.BreakIterator;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 
@@ -39,12 +40,16 @@ public class RagService {
     private static final int CHUNK_SIZE = 900;
     private static final int CHUNK_OVERLAP = 120;
     private static final int MAX_REFERENCES = 5;
+    private static final int KEYWORD_RERANK_CANDIDATES = 20;
+    private static final double VECTOR_SCORE_WEIGHT = 0.75;
+    private static final double KEYWORD_SCORE_WEIGHT = 0.25;
     private static final int MAX_CONTEXT_LENGTH = 6000;
     private static final int EMBEDDING_BATCH_SIZE = 16;
 
     private final SessionDocumentMapper sessionDocumentMapper;
     private final DashScopeEmbeddingClient embeddingClient;
     private final ElasticsearchVectorStore vectorStore;
+    private final KeywordExtractor keywordExtractor;
 
     @Value("${app.upload-dir}")
     private String uploadDir;
@@ -94,8 +99,11 @@ public class RagService {
             return List.of();
         }
 
-        return vectorStore.search(sessionId, queryEmbedding, MAX_REFERENCES)
+        List<String> questionKeywords = keywordExtractor.extract(question);
+        return vectorStore.search(sessionId, queryEmbedding, KEYWORD_RERANK_CANDIDATES)
                 .stream()
+                .sorted(Comparator.comparingDouble(result -> -hybridScore(result, questionKeywords)))
+                .limit(MAX_REFERENCES)
                 .map(this::toReference)
                 .toList();
     }
@@ -156,6 +164,7 @@ public class RagService {
                         textChunk.start(),
                         textChunk.end(),
                         textChunk.content(),
+                        keywordExtractor.extract(textChunk.content()),
                         embeddings.get(index)
                 ));
             }
@@ -243,6 +252,11 @@ public class RagService {
     private String safeName(String value) {
         String safe = value.replaceAll("[\\\\/:*?\"<>|]", "_").trim();
         return StringUtils.hasText(safe) ? safe : IdUtil.uuid();
+    }
+
+    private double hybridScore(VectorSearchResult result, List<String> questionKeywords) {
+        double keywordScore = keywordExtractor.similarity(questionKeywords, result.keywords());
+        return result.score() * VECTOR_SCORE_WEIGHT + keywordScore * KEYWORD_SCORE_WEIGHT;
     }
 
     private record TextChunk(int index, int start, int end, String content) {

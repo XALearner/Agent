@@ -89,7 +89,8 @@ public class ElasticsearchVectorStore {
                 "chunk_index",
                 "start_offset",
                 "end_offset",
-                "content"
+                "content",
+                "keywords"
         ));
 
         HttpResponse<String> response = send("POST", "/" + indexPath() + "/_search", toJson(request));
@@ -122,6 +123,7 @@ public class ElasticsearchVectorStore {
         propertiesMapping.put("start_offset", Map.of("type", "integer"));
         propertiesMapping.put("end_offset", Map.of("type", "integer"));
         propertiesMapping.put("content", Map.of("type", "text"));
+        propertiesMapping.put("keywords", Map.of("type", "keyword"));
         propertiesMapping.put(VECTOR_FIELD, embeddingMapping);
 
         Map<String, Object> mapping = Map.of(
@@ -151,6 +153,7 @@ public class ElasticsearchVectorStore {
                         source.path("start_offset").asInt(),
                         source.path("end_offset").asInt(),
                         source.path("content").asText(),
+                        parseKeywords(source.path("keywords")),
                         hit.path("_score").asDouble()
                 ));
             }
@@ -169,8 +172,23 @@ public class ElasticsearchVectorStore {
         source.put("start_offset", chunk.startOffset());
         source.put("end_offset", chunk.endOffset());
         source.put("content", chunk.content());
+        source.put("keywords", chunk.keywords());
         source.put(VECTOR_FIELD, chunk.embedding());
         return source;
+    }
+
+    private List<String> parseKeywords(JsonNode keywordsNode) {
+        if (!keywordsNode.isArray()) {
+            return List.of();
+        }
+        List<String> keywords = new ArrayList<>();
+        for (JsonNode keyword : keywordsNode) {
+            String value = keyword.asText();
+            if (StringUtils.hasText(value)) {
+                keywords.add(value);
+            }
+        }
+        return keywords;
     }
 
     private HttpResponse<String> send(String method, String path, String body) {
@@ -238,6 +256,7 @@ public class ElasticsearchVectorStore {
             int startOffset,
             int endOffset,
             String content,
+            List<String> keywords,
             List<Double> embedding
     ) {
     }
@@ -249,6 +268,7 @@ public class ElasticsearchVectorStore {
             int startOffset,
             int endOffset,
             String content,
+            List<String> keywords,
             double score
     ) {
     }

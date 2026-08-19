@@ -41,3 +41,6 @@ elasticsearch:
   api-key: ${ELASTICSEARCH_API_KEY:}
   vector-index: ${ELASTICSEARCH_VECTOR_INDEX:agent-session-document-chunks}
   num-candidates: ${ELASTICSEARCH_NUM_CANDIDATES:100}
+
+keyword:
+  english-tokenizer-path: ${HF_TOKENIZER_PATH:C:/Users/Administrator/.cache/huggingface/hub/models--distilbert-base-uncased/snapshots/12040accade4e8a0f71eabdb258fecc2e7e948be/tokenizer.json}

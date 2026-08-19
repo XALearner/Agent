@@ -21,6 +21,7 @@
         <java.version>17</java.version>
         <mybatis-plus.version>3.5.7</mybatis-plus.version>
         <langchain4j.version>1.18.1</langchain4j.version>
+        <djl.version>0.31.1</djl.version>
     </properties>
 
     <dependencies>
@@ -42,6 +43,16 @@
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-open-ai</artifactId>
             <version>${langchain4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.huaban</groupId>
+            <artifactId>jieba-analysis</artifactId>
+            <version>1.0.2</version>
+        </dependency>
+        <dependency>
+            <groupId>ai.djl.huggingface</groupId>
+            <artifactId>tokenizers</artifactId>
+            <version>${djl.version}</version>
         </dependency>
         <dependency>
             <groupId>org.apache.pdfbox</groupId>
