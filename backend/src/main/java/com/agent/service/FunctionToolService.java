@@ -23,6 +23,7 @@ public class FunctionToolService {
 
     private final ObjectMapper objectMapper;
     private final RagService ragService;
+    private final McpClientService mcpClientService;
 
     public List<Map<String, Object>> specifications(boolean includeDocumentSearch) {
         List<Map<String, Object>> tools = new java.util.ArrayList<>();
@@ -61,6 +62,7 @@ public class FunctionToolService {
                     )
             ));
         }
+        tools.addAll(mcpClientService.toolSpecifications());
         return tools;
     }
 
@@ -69,7 +71,12 @@ public class FunctionToolService {
         return switch (name) {
             case "get_current_datetime" -> currentDatetime(root);
             case "search_session_documents" -> searchSessionDocuments(root, sessionId);
-            default -> throw new BizException("不支持的函数调用：" + name);
+            default -> {
+                if (mcpClientService.supports(name)) {
+                    yield mcpClientService.callTool(name, root);
+                }
+                throw new BizException("不支持的函数调用：" + name);
+            }
         };
     }
 

@@ -48,3 +48,7 @@ elasticsearch:
 
 keyword:
   english-tokenizer-path: ${HF_TOKENIZER_PATH:C:/Users/Administrator/.cache/huggingface/hub/models--distilbert-base-uncased/snapshots/12040accade4e8a0f71eabdb258fecc2e7e948be/tokenizer.json}
+
+mcp:
+  enabled: ${MCP_ENABLED:false}
+  servers: {}
