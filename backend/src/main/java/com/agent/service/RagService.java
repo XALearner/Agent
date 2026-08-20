@@ -32,6 +32,8 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.stream.IntStream;
 
 @Service
 @RequiredArgsConstructor
@@ -40,7 +42,7 @@ public class RagService {
     private static final int CHUNK_SIZE = 900;
     private static final int CHUNK_OVERLAP = 120;
     private static final int MAX_REFERENCES = 5;
-    private static final int KEYWORD_RERANK_CANDIDATES = 20;
+    private static final int KEYWORD_RERANK_CANDIDATES = 100;
     private static final double VECTOR_SCORE_WEIGHT = 0.75;
     private static final double KEYWORD_SCORE_WEIGHT = 0.25;
     private static final int MAX_CONTEXT_LENGTH = 6000;
@@ -48,6 +50,7 @@ public class RagService {
 
     private final SessionDocumentMapper sessionDocumentMapper;
     private final DashScopeEmbeddingClient embeddingClient;
+    private final DashScopeRerankClient rerankClient;
     private final ElasticsearchVectorStore vectorStore;
     private final KeywordExtractor keywordExtractor;
 
@@ -99,10 +102,14 @@ public class RagService {
             return List.of();
         }
 
+        List<VectorSearchResult> candidates = vectorStore.search(sessionId, queryEmbedding, KEYWORD_RERANK_CANDIDATES);
+        if (candidates.isEmpty()) {
+            return List.of();
+        }
+
         List<String> questionKeywords = keywordExtractor.extract(question);
-        return vectorStore.search(sessionId, queryEmbedding, KEYWORD_RERANK_CANDIDATES)
+        return rerank(question, candidates, questionKeywords)
                 .stream()
-                .sorted(Comparator.comparingDouble(result -> -hybridScore(result, questionKeywords)))
                 .limit(MAX_REFERENCES)
                 .map(this::toReference)
                 .toList();
@@ -259,6 +266,48 @@ public class RagService {
         return result.score() * VECTOR_SCORE_WEIGHT + keywordScore * KEYWORD_SCORE_WEIGHT;
     }
 
+    private List<VectorSearchResult> rerank(String question, List<VectorSearchResult> candidates, List<String> questionKeywords) {
+        if (!rerankClient.isEnabled()) {
+            return hybridRank(candidates, questionKeywords);
+        }
+
+        List<String> documents = candidates.stream()
+                .map(VectorSearchResult::content)
+                .toList();
+        List<DashScopeRerankClient.RerankResult> rerankResults = rerankClient.rerank(question, documents, candidates.size());
+        if (rerankResults.isEmpty()) {
+            return hybridRank(candidates, questionKeywords);
+        }
+
+        Map<Integer, Double> crossEncoderScores = rerankResults.stream()
+                .filter(result -> result.index() >= 0 && result.index() < candidates.size())
+                .collect(java.util.stream.Collectors.toMap(
+                        DashScopeRerankClient.RerankResult::index,
+                        DashScopeRerankClient.RerankResult::score,
+                        Math::max
+                ));
+        return IntStream.range(0, candidates.size())
+                .filter(crossEncoderScores::containsKey)
+                .mapToObj(index -> new RerankedSearchResult(
+                        candidates.get(index),
+                        crossEncoderScores.get(index),
+                        hybridScore(candidates.get(index), questionKeywords)
+                ))
+                .sorted(Comparator.comparingDouble(RerankedSearchResult::crossEncoderScore).reversed()
+                        .thenComparing(Comparator.comparingDouble(RerankedSearchResult::hybridScore).reversed()))
+                .map(RerankedSearchResult::result)
+                .toList();
+    }
+
+    private List<VectorSearchResult> hybridRank(List<VectorSearchResult> candidates, List<String> questionKeywords) {
+        return candidates.stream()
+                .sorted(Comparator.comparingDouble(result -> -hybridScore(result, questionKeywords)))
+                .toList();
+    }
+
     private record TextChunk(int index, int start, int end, String content) {
+    }
+
+    private record RerankedSearchResult(VectorSearchResult result, double crossEncoderScore, double hybridScore) {
     }
 }
