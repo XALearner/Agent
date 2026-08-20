@@ -48,6 +48,8 @@ public class ChatController {
                     .message(ragService.augmentMessage(request.getMessage(), references))
                     .model(request.getModel())
                     .systemPrompt(request.getSystemPrompt())
+                    .sessionId(sessionId)
+                    .functionCallingEnabled(true)
                     .build();
 
             String answer = chatModelService.streamChat(request.getProvider(), modelRequest, (content, thinking) -> {

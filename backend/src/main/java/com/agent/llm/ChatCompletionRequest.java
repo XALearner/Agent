@@ -10,4 +10,6 @@ public class ChatCompletionRequest {
     private String message;
     private String model;
     private String systemPrompt;
+    private String sessionId;
+    private boolean functionCallingEnabled;
 }
